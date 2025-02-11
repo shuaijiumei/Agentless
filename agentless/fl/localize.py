@@ -400,6 +400,7 @@ def localize_irrelevant(args):
     existing_instance_ids = (
         load_existing_instance_ids(args.output_file) if args.skip_existing else set()
     )
+
     if args.num_threads == 1:
         for bug in tqdm(swe_bench_data, colour="MAGENTA"):
             localize_irrelevant_instance(
@@ -574,7 +575,7 @@ def main():
         default="gpt-4o-2024-05-13",
         choices=[
             "gpt-4o-2024-05-13",
-            "deepseek-coder",
+            "deepseek-chat",
             "gpt-4o-mini-2024-07-18",
             "claude-3-5-sonnet-20241022",
         ],

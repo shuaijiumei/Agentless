@@ -5,7 +5,6 @@ import anthropic
 import openai
 import tiktoken
 
-
 def num_tokens_from_messages(message, model="gpt-3.5-turbo-0301"):
     """Returns the number of tokens used by a list of messages."""
     try:
@@ -55,7 +54,7 @@ def handler(signum, frame):
     raise Exception("end of time")
 
 
-def request_chatgpt_engine(config, logger, base_url=None, max_retries=40, timeout=100):
+def request_chatgpt_engine(config, logger, base_url='https://api.claudeshop.top/v1', max_retries=40, timeout=100):
     ret = None
     retries = 0
 
@@ -66,6 +65,7 @@ def request_chatgpt_engine(config, logger, base_url=None, max_retries=40, timeou
             # Attempt to get the completion
             logger.info("Creating API request")
 
+            # 设置代理
             ret = client.chat.completions.create(**config)
 
         except openai.OpenAIError as e:

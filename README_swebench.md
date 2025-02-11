@@ -73,8 +73,12 @@ Run the following command to generate the LLM-predicted suspicious files:
 python agentless/fl/localize.py --file_level \
                                 --output_folder results/swe-bench-lite/file_level \
                                 --num_threads 10 \
-                                --skip_existing 
+                                --skip_existing \
+                                --target_id=django__django-10914 
 ```
+deepseek api key: sk-0f796e9c0ce54506b05a4fb4d0a06c5e
+openai api key: sk-vRMVHYSlrZz5Z1ZiuWJlrKTnGd1HWu9NrzntLZuae7Dg760s
+url: https://api.claudeshop.top/v1/
 
 This will save all the LLM-predicted suspicious file locations in  `results/swe-bench-lite/file_level/loc_outputs.jsonl` with the logs saved in `results/swe-bench-lite/file_level/localization_logs`
 
@@ -86,7 +90,8 @@ This is done by first filtering out irrelevant folders by using LLM to produce a
 python agentless/fl/localize.py --file_level \
                                 --irrelevant \
                                 --output_folder results/swe-bench-lite/file_level_irrelevant \
-                                --num_threads 10 \
+                                --num_threads 1 \
+                                --target_id django__django-10914 \
                                 --skip_existing 
 ```
 
@@ -100,7 +105,8 @@ python agentless/fl/retrieve.py --index_type simple \
                                 --filter_file results/swe-bench-lite/file_level_irrelevant/loc_outputs.jsonl \
                                 --output_folder results/swe-bench-lite/retrievel_embedding \
                                 --persist_dir embedding/swe-bench_simple \
-                                --num_threads 10 
+                                --num_threads 10 \
+                                --target_id django__django-10914
 ```
 
 This will save the retrieved files in `results/swe-bench-lite/retrievel_embedding/retrieve_locs.jsonl` with the logs saved in `results/swe-bench-lite/retrievel_embedding/retrieval_logs`
@@ -130,7 +136,8 @@ python agentless/fl/localize.py --related_level \
                                 --compress \
                                 --start_file results/swe-bench-lite/file_level_combined/combined_locs.jsonl \
                                 --num_threads 10 \
-                                --skip_existing 
+                                --skip_existing \
+                                --target_id django__django-10914
 ```
 
 This will save the related elements in `results/swe-bench-lite/related_elements/loc_outputs.jsonl` with the logs saved in `results/swe-bench-lite/related_elements/localization_logs`
@@ -149,6 +156,7 @@ python agentless/fl/localize.py --fine_grain_line_level \
                                 --num_samples 4 \
                                 --start_file results/swe-bench-lite/related_elements/loc_outputs.jsonl \
                                 --num_threads 10 \
+                                --target_id django__django-10914 \
                                 --skip_existing 
 ```
 
@@ -178,7 +186,8 @@ python agentless/fl/localize.py --merge \
                                 --output_folder results/swe-bench-lite/edit_location_individual \
                                 --top_n 3 \
                                 --num_samples 4 \
-                                --start_file results/swe-bench-lite/edit_location_samples/loc_outputs.jsonl 
+                                --start_file results/swe-bench-lite/edit_location_samples/loc_outputs.jsonl \
+                                --target_id django__django-10914
 ```
 
 The separate sets of edit locations can be found in `results/swe-bench-lite/edit_location_individual`. The location files will be named `loc_merged_{x}-{x}_outputs.jsonl` where `x` indicates the individual samples. For our experiments on SWE-bench, we will use all 4 sets of edit locations and perform repairs on them individually to generate 4 different repair runs.
@@ -201,7 +210,8 @@ python agentless/repair/repair.py --loc_file results/swe-bench-lite/edit_locatio
                                   --cot \
                                   --diff_format \
                                   --gen_and_process \
-                                  --num_threads 2 
+                                  --num_threads 2 \
+                                  --target_id django__django-10914
 ```
 
 <details><summary>Additional Repair Commands</summary>
@@ -291,7 +301,9 @@ Similar to patch generation, Agentless also generates multiple samples of reprod
 ```shell
 python agentless/test/generate_reproduction_tests.py --max_samples 40 \
                                                      --output_folder results/swe-bench-lite/reproduction_test_samples \
-                                                     --num_threads 10 
+                                                     --num_threads 10 \
+                                                     --target_id django__django-10914 \
+                                                     
 ```
 
 This will generate 40 samples (1 greedy + 39 temperature sampling) per issue. The generated reproduction tests can be found in `results/swe-bench-lite/reproduction_test_samples/output.jsonl`. The corresponding logs can be found in `results/swe-bench-lite/reproduction_test_samples/generating_test_logs/`.
