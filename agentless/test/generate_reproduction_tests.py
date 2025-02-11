@@ -169,6 +169,7 @@ def gen_test(instance_id, args, swe_bench_data, prev_o, write_lock=None):
 
     sample_responses.append(greedy_traj)
     # get temperature samples
+    # TODO: 个性化推荐输出，根据定位到需要更改的文件，然后根据文件内容追踪到需要修改的代码，然后根据代码追踪到已经存在的测试，把这些测试作为 examples 和已经知道的信息作为 context 输入给模型，让模型生成测试
     model = make_model(
         model=args.model,
         logger=logger,
