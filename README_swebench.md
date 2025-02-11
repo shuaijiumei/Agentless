@@ -76,9 +76,6 @@ python agentless/fl/localize.py --file_level \
                                 --skip_existing \
                                 --target_id=django__django-10914 
 ```
-deepseek api key: sk-0f796e9c0ce54506b05a4fb4d0a06c5e
-openai api key: sk-vRMVHYSlrZz5Z1ZiuWJlrKTnGd1HWu9NrzntLZuae7Dg760s
-url: https://api.claudeshop.top/v1/
 
 This will save all the LLM-predicted suspicious file locations in  `results/swe-bench-lite/file_level/loc_outputs.jsonl` with the logs saved in `results/swe-bench-lite/file_level/localization_logs`
 
@@ -299,11 +296,11 @@ In addition to the regression tests, Agentless also generates a reproduction tes
 
 Similar to patch generation, Agentless also generates multiple samples of reproduction tests, and then perform selection:
 ```shell
-python agentless/test/generate_reproduction_tests.py --max_samples 40 \
+python ./agentless/test/generate_reproduction_tests.py --max_samples 40 \
                                                      --output_folder results/swe-bench-lite/reproduction_test_samples \
                                                      --num_threads 10 \
-                                                     --target_id django__django-10914 \
-                                                     
+                                                     --target_id django__django-10914
+
 ```
 
 This will generate 40 samples (1 greedy + 39 temperature sampling) per issue. The generated reproduction tests can be found in `results/swe-bench-lite/reproduction_test_samples/output.jsonl`. The corresponding logs can be found in `results/swe-bench-lite/reproduction_test_samples/generating_test_logs/`.
