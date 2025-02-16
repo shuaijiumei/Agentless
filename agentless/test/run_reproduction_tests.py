@@ -5,7 +5,7 @@ import os
 from datasets import load_dataset
 
 from agentless.test.run_tests import run_reproduction_tests, txt_file_contains_string
-from agentless.util.utils import load_jsonl
+from agentless.util.utils import load_json, load_jsonl
 
 execution_results = dict()
 
@@ -31,17 +31,19 @@ def run_reproduction_for_each_instance(args, lines, run_id, test_jsonl):
 
 
 def _run_reproduction_tests(args):
+    # 只跑测试，不应用模型补丁
     if args.testing:
         # for reproduction test selection
         # run on original repo to select tests which can reproduce the issue
         ds = load_dataset(args.dataset)
         instance_ids = ds["test"]["instance_id"]
+        # 
         patches = [
             {"instance_id": instance_id, "patch": "", "normalized_patch": ""}
             for instance_id in instance_ids
         ]
 
-        evaluation_tests = load_jsonl(args.test_jsonl)
+        evaluation_tests = load_json(args.test_jsonl)
 
         results = run_reproduction_tests(
             instance_ids,
@@ -56,13 +58,13 @@ def _run_reproduction_tests(args):
             dataset_name=args.dataset,
         )
 
-        with open(args.test_jsonl.replace(".jsonl", "_verified.jsonl"), "w") as file:
-            for evaluation_test in evaluation_tests:
-                instance_id = evaluation_test["instance_id"]
-                if instance_id in results and results[instance_id]:
-                    evaluation_test["verified"] = True
-                    file.write(json.dumps(evaluation_test) + "\n")
+        with open(args.test_jsonl.replace(".json", "_verified.json"), "w") as file:
+            instance_id = evaluation_tests["instance_id"]
+            if instance_id in results and results[instance_id]:
+                evaluation_tests["verified"] = True
+            file.write(json.dumps(evaluation_tests, indent=4) + "\n")
 
+    # 在groundtruth patches上测试
     elif args.predictions_path == "gold":
         # check on groundtruth patches
         # for evaluation purposes
@@ -89,6 +91,7 @@ def _run_reproduction_tests(args):
         ) as file:
             file.write(json.dumps(results))
 
+    # 在agentless生成的patches上测试
     else:
         # run on the agentless generated patches
         assert args.predictions_path.endswith("_processed.jsonl")

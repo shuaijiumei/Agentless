@@ -18,12 +18,17 @@ from swebench.harness.constants import (
 )
 from swebench.harness.docker_build import build_env_images
 from swebench.harness.run_evaluation import get_dataset_from_preds, run_instance
-from swebench.harness.test_spec import (
+# from swebench.harness.test_spec import (
+#     TestSpec,
+#     make_env_script_list,
+#     make_repo_script_list,
+# )
+from swebench.harness.test_spec.test_spec import (
     TestSpec,
     make_env_script_list,
     make_repo_script_list,
-)
-from swebench.harness.utils import get_test_directives
+) 
+# from swebench.harness.utils import get_test_directives
 from tqdm import tqdm
 
 OPEN_FILE_LIMIT = 4096
@@ -78,15 +83,22 @@ def txt_file_contains_string(path_to_txt, expected_output, other_patterns=[]):
     return False
 
 
-def create_instance_test_dict(jsonl_file_path):
+def create_instance_test_dict(file_path):
     instance_test_dict = {}
 
-    with open(jsonl_file_path, "r") as file:
-        for line in file:
-            json_obj = json.loads(line.strip())
+    if file_path.endswith(".json"):
+        with open(file_path, "r") as file:
+            json_obj = json.load(file)
             instance_id = json_obj["instance_id"]
             test_patch = json_obj["test_patch"]
             instance_test_dict[instance_id] = test_patch
+    else:
+        with open(file_path, "r") as file:
+            for line in file:
+                json_obj = json.loads(line.strip())
+                instance_id = json_obj["instance_id"]
+                test_patch = json_obj["test_patch"]
+                instance_test_dict[instance_id] = test_patch
 
     return instance_test_dict
 
@@ -159,6 +171,13 @@ def make_reproduction_sec(instance: SWEbenchInstance) -> TestSpec:
         arch=arch,
         FAIL_TO_PASS=fail_to_pass,
         PASS_TO_PASS=pass_to_pass,
+        language='py',
+        docker_specs= {
+        "pnpm_version": "9.5.0",
+        "node_version": "21.6.2",
+        "python_version": "3.9",
+        },
+        namespace='swebench'
     )
 
 
@@ -342,27 +361,30 @@ def run_reproduction_tests(
     test_jsonl=None,
     dataset_name="princeton-nlp/SWE-bench_Lite",
 ):
+    # 验证 instance_ids 与 model_patches 数量是否一致
     assert len(instance_ids) == len(
         model_patches
     ), "There must be the same number of instance_ids as model patches"
+    # 设置打开文件的最大数目限制
     resource.setrlimit(resource.RLIMIT_NOFILE, (OPEN_FILE_LIMIT, OPEN_FILE_LIMIT))
-
-    instance_to_reproduction_code = create_instance_test_dict(test_jsonl)
 
     print(f"Using run_id: {run_id}")
 
     split = "test"
-    client = docker.from_env()
+    client = docker.from_env()  # 创建 Docker 客户端，用于后续的镜像构建和容器管理
     force_rebuild = False
 
     predictions = {}
 
+    # 根据 instance_ids 和 model_patches 构建 predictions 字典
     for idx, one_instance_id in enumerate(instance_ids):
+        # 如果没有应用模型 patch，则使用 NOOP_PATCH，否则使用传入的 patch
         if not apply_model_patch:
             patch_to_apply = NOOP_PATCH
         else:
             patch_to_apply = model_patches[idx]
         if testing_patches:
+            # 如果处于测试模式，构造测试用的 predictions 对象，patch 固定为 NOOP_PATCH
             predictions[one_instance_id] = {
                 "model_name_or_path": "test",
                 "model_patch": NOOP_PATCH,
@@ -370,39 +392,50 @@ def run_reproduction_tests(
             }
             # instance_to_reproduction_code[one_instance_id] = patch_to_apply
         else:
+            # 正常构造 predictions 数据
             predictions[one_instance_id] = {
                 "model_name_or_path": "test",  # TODO change.
                 "model_patch": patch_to_apply,
                 "instance_id": one_instance_id,
             }
 
+    # 根据 predictions 和其他参数获取实例数据集
     instances = get_dataset_from_preds(
-        dataset_name, split, instance_ids, predictions, run_id
+        dataset_name, split, instance_ids, predictions, run_id, rewrite_reports=False
     )
 
     if not instances:
         print("No instances to run.")
     else:
+        # 构建环境镜像，使用 Docker client 执行，指定是否强制重建
         build_env_images(client, instances, force_rebuild, max_workers)
+
+    # 初始化一个空字典，用于存储 instance_id 与对应的测试 re-production code
+    instance_to_reproduction_code = create_instance_test_dict(test_jsonl)
 
     no_f2p_instances = []
 
+    # 对每个实例进行设置，把 FAIL_TO_PASS 和 PASS_TO_PASS 的内容全部清空
     for instance in instances:
         revised_instance = instance
         revised_instance["FAIL_TO_PASS"] = "[]"
-        revised_instance["PASS_TO_PASS"] = "[]"
+        revised_instance["PASS_TO_PASS"] = "[]"  # 注：在此处 PASS_TO_PASS 被置为空字符串列表
 
+        # 如果在 instance_to_reproduction_code 中有对应的 production_test，则设置 production_test
         if instance["instance_id"] in instance_to_reproduction_code:
             revised_instance["production_test"] = instance_to_reproduction_code[
                 instance["instance_id"]
             ]
-            # only run if there is production test
+            # 仅当有 production_test 时才添加到待测试实例列表中
             no_f2p_instances.append(revised_instance)
 
+    # 使用 make_reproduction_sec 将实例转换为测试规格（TestSpec）对象列表
     test_specs = list(map(make_reproduction_sec, no_f2p_instances))
 
+    # 调整补丁顺序，让较慢的实例先执行
     test_specs = rearrange_patches(test_specs)
 
+    # 获取所有测试实例对应的镜像 id
     instance_image_ids = {x.instance_image_key for x in test_specs}
     existing_images = {
         tag
@@ -412,11 +445,12 @@ def run_reproduction_tests(
     }
     print(f"Found {len(existing_images)} existing instance images. Will reuse them.")
 
-    # Load in previously evaluated results
+    # 从之前评估的结果中加载解析信息，结果存储在 resolved_dict 字典中
     resolved_dict = extract_resolved_info(
         os.path.join("logs", "run_evaluation", run_id, "test")
     )
 
+    # 判断要运行的实例
     if instances_to_run:
         ids = instances_to_run
     else:
@@ -428,18 +462,15 @@ def run_reproduction_tests(
 
     results = {}
 
-    print(
-        f"Running {len([test_spec for test_spec in test_specs if test_spec.instance_id in ids])} unevaluated instances..."
-    )
-
-    # Set the empty instances as not resolving the issue
+    # 如果 patch 是空字符串则标记该实例为未解决
     for index, patch in enumerate(model_patches):
         if patch == "":
             resolved_dict[instance_ids[index]] = False
 
+    # 使用 tqdm 显示进度条；创建线程池执行测试实例运行
     with tqdm(total=len(ids), smoothing=0, colour="MAGENTA") as pbar:
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
-            # Create a future for running each instance
+            # 为每个待测试实例提交运行任务，run_instance 会执行测试命令
             futures = {
                 executor.submit(
                     run_instance,
@@ -454,28 +485,30 @@ def run_reproduction_tests(
                 for test_spec in test_specs
                 if test_spec.instance_id in ids
             }
-            # Wait for each future to complete
+            # 等待所有任务完成
             for future in as_completed(futures):
                 pbar.update(1)
                 result = future.result()
                 if result:
                     instance_id = result[0]
+                    # 从结果数据中获取 resolved 状态，并更新 resolved_dict
                     resolved = result[1][instance_id]["resolved"]
                     resolved_dict[instance_id] = resolved
-                    # See if the tests ran successfully
+                    # 根据 testing_patches 判断测试成功的输出内容及不允许出现的其他模式
                     if testing_patches:
                         expected_output = "Issue reproduced"
                         other_patterns = ["Issue resolved", "Other issues"]
                     else:
                         expected_output = "Issue resolved"
                         other_patterns = ["Issue reproduced", "Other issues"]
+                    # 根据输出文件判断测试是否通过
                     path_to_log = f"logs/run_evaluation/{run_id}/{split}/{instance_id}/test_output.txt"
                     passes_tests = txt_file_contains_string(
                         path_to_log, expected_output, other_patterns=other_patterns
                     )
                     results[instance_id] = passes_tests
                 try:
-                    # Update progress bar, check if instance ran successfully
+                    # 重复调用 future.result() 用于捕获潜在异常（无逻辑影响）
                     future.result()
                 except Exception as e:
                     traceback.print_exc()

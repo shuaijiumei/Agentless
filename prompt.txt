@@ -1,0 +1,74 @@
+
+We are currently solving the following issue within our repository. Here is the issue text:
+--- BEGIN ISSUE ---
+
+Set default FILE_UPLOAD_PERMISSION to 0o644.
+Description
+	
+Hello,
+As far as I can see, the ​File Uploads documentation page does not mention any permission issues.
+What I would like to see is a warning that in absence of explicitly configured FILE_UPLOAD_PERMISSIONS, the permissions for a file uploaded to FileSystemStorage might not be consistent depending on whether a MemoryUploadedFile or a TemporaryUploadedFile was used for temporary storage of the uploaded data (which, with the default FILE_UPLOAD_HANDLERS, in turn depends on the uploaded data size).
+The tempfile.NamedTemporaryFile + os.rename sequence causes the resulting file permissions to be 0o0600 on some systems (I experience it here on CentOS 7.4.1708 and Python 3.6.5). In all probability, the implementation of Python's built-in tempfile module explicitly sets such permissions for temporary files due to security considerations.
+I found mentions of this issue ​on GitHub, but did not manage to find any existing bug report in Django's bug tracker.
+
+--- END ISSUE ---
+
+We have found the bug code and the related test functions in the following files:
+File: django/conf/global_settings.py
+Related items: ['variable: FILE_UPLOAD_PERMISSIONS']
+Test functions: 
+File: django/core/files/storage.py
+Related items: ['class: FileSystemStorage']
+Test functions: 
+    class FileSystemStorageTests(unittest.TestCase):
+
+      def test_deconstruction(self):
+          path, args, kwargs = temp_storage.deconstruct()
+          self.assertEqual(path, "django.core.files.storage.FileSystemStorage")
+          self.assertEqual(args, ())
+          self.assertEqual(kwargs, {'location': temp_storage_location})
+
+          kwargs_orig = {
+              'location': temp_storage_location,
+              'base_url': 'http://myfiles.example.com/'
+          }
+          storage = FileSystemStorage(**kwargs_orig)
+          path, args, kwargs = storage.deconstruct()
+          self.assertEqual(kwargs, kwargs_orig)
+
+      def test_lazy_base_url_init(self):
+          """
+          FileSystemStorage.__init__() shouldn't evaluate base_url.
+          """
+          storage = FileSystemStorage(base_url=reverse_lazy('app:url'))
+          with self.assertRaises(NoReverseMatch):
+              storage.url(storage.base_url)
+
+File: django/core/files/uploadedfile.py
+Related items: ['class: TemporaryUploadedFile\nclass: InMemoryUploadedFile']
+Test functions: 
+    class InMemoryUploadedFileTests(unittest.TestCase):
+      def test_open_resets_file_to_start_and_returns_context_manager(self):
+          uf = InMemoryUploadedFile(StringIO('1'), '', 'test', 'text/plain', 1, 'utf8')
+          uf.read()
+          with uf.open() as f:
+              self.assertEqual(f.read(), '1')
+
+    class TemporaryUploadedFileTests(unittest.TestCase):
+      def test_extension_kept(self):
+          """The temporary file name has the same suffix as the original file."""
+          with TemporaryUploadedFile('test.txt', 'text/plain', 1, 'utf8') as temp_file:
+              self.assertTrue(temp_file.file.name.endswith('.upload.txt'))
+
+
+
+Please generate a complete test that can be used to reproduce the issue. You need to understand the issue, the related bug code and the related test functions. Understood the existed test functions could help you generate the new test. You should consider the miss point of the existed test functions and generate the new test. The generated test should be able to be used to both reproduce the issue as well as to verify the issue has been fixed.
+
+
+The complete test should contain the following:
+1. Necessary imports
+2. Code to reproduce the issue described in the issue text
+
+Wrap the complete test in ```python...```.
+================================================
+

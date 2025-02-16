@@ -296,12 +296,14 @@ In addition to the regression tests, Agentless also generates a reproduction tes
 
 Similar to patch generation, Agentless also generates multiple samples of reproduction tests, and then perform selection:
 ```shell
-python ./agentless/test/generate_reproduction_tests.py --max_samples 40 \
+python ./agentless/test/generate_reproduction_tests.py --max_samples 20 \
                                                      --output_folder results/swe-bench-lite/reproduction_test_samples \
-                                                     --num_threads 10 \
+                                                     --num_threads 1 \
                                                      --target_id django__django-10914
 
 ```
+ Agentless Test Generation 生成测试的逻辑修改为了，根据 instance_id 找到对应的编辑位置文件，然后根据编辑位置文件生成测试。 流程走下来一共有 4 个可能的编辑位置，分别对这 4 个可能的位置进行分析，追踪到相应的测试函数，然后选取这个测试函数作为例子，生成测试。 一个可能的编辑位置会生成 max_samples 个测试，一共有 4 个可能的编辑位置，所以一共有 4 * max_samples 个测试。
+
 
 This will generate 40 samples (1 greedy + 39 temperature sampling) per issue. The generated reproduction tests can be found in `results/swe-bench-lite/reproduction_test_samples/output.jsonl`. The corresponding logs can be found in `results/swe-bench-lite/reproduction_test_samples/generating_test_logs/`.
 
@@ -346,7 +348,8 @@ for num in {0..9..1}; do
     run_id_prefix=$(basename $folder); 
     python agentless/test/run_reproduction_tests.py --test_jsonl results/swe-bench-lite/reproduction_test_samples/reproduction_tests.jsonl \
                                                     --predictions_path="${folder}/output_${num}_processed.jsonl" \
-                                                    --run_id="${run_id_prefix}_reproduction_${num}" --num_workers 10;
+                                                    --run_id="${run_id_prefix}_reproduction_${num}" --num_workers 10 \
+                                                    ;
 done
 ```
 

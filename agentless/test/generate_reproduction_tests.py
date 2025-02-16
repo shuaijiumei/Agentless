@@ -13,7 +13,8 @@ from tqdm import tqdm
 from agentless.util.api_requests import num_tokens_from_messages
 from agentless.util.model import make_model
 from agentless.util.postprocess_data import remove_comments_and_docstrings
-from agentless.util.utils import load_jsonl, setup_logger
+from agentless.util.utils import load_jsonl, load_json, setup_logger
+from agentless.test.utils import find_edit_location_file, gen_prompt
 
 generate_tests_prompt_template = """
 We are currently solving the following issue within our repository. Here is the issue text:
@@ -94,7 +95,9 @@ def extract_first_code_block(text):
 
 
 def gen_test(instance_id, args, swe_bench_data, prev_o, write_lock=None):
-
+    """
+    为给定的问题实例生成测试用例
+    """
     if args.target_id is not None:
         if args.target_id != instance_id:
             return
@@ -103,6 +106,7 @@ def gen_test(instance_id, args, swe_bench_data, prev_o, write_lock=None):
         args.output_folder, "generating_test_logs", f"{instance_id}.log"
     )
     logger = setup_logger(log_file)
+
     found = False
     for o in prev_o:
         if o["instance_id"] == instance_id:
@@ -118,132 +122,118 @@ def gen_test(instance_id, args, swe_bench_data, prev_o, write_lock=None):
     bench_data = [x for x in swe_bench_data if x["instance_id"] == instance_id][0]
     problem_statement = bench_data["problem_statement"]
 
-    raw_outputs, counts, all_generations, traj = (
-        [],
-        [],
-        [],
-        [],
-    )
-
-    raw_output = ""
-
-    prompt_template = generate_tests_prompt_template
-    message = prompt_template.format(
-        problem_statement=problem_statement,
-    ).strip()
-
-    logger.info(f"prompting with message:\n{message}")
-
-    all_generations, counts, traj = [], [], []
+    # 获取该问题对应的相关代码定位信息
+    related_locs_list = find_edit_location_file(instance_id)
     sample_responses = []
 
-    # get greedy sample
-    model = make_model(
-        model=args.model,
-        logger=logger,
-        backend=args.backend,
-        max_tokens=1024,
-        temperature=0,
-        batch_size=1,
-    )
-    if args.skip_greedy:
-        greedy_traj = {
-            "response": "",
-            "usage": {
-                "completion_tokens": 0,
-                "prompt_tokens": 0,
-            },
-        }
-    else:
-        if args.mock:
-            greedy_traj = {
-                "response": "",
-                "usage": {
-                    "prompt_tokens": num_tokens_from_messages(message, args.model),
-                },
-            }
-        else:
-            greedy_traj = model.codegen(
-                message, num_samples=1, prompt_cache=args.max_samples > 1
-            )[0]
-
-    sample_responses.append(greedy_traj)
-    # get temperature samples
-    # TODO: 个性化推荐输出，根据定位到需要更改的文件，然后根据文件内容追踪到需要修改的代码，然后根据代码追踪到已经存在的测试，把这些测试作为 examples 和已经知道的信息作为 context 输入给模型，让模型生成测试
-    model = make_model(
-        model=args.model,
-        logger=logger,
-        backend=args.backend,
-        max_tokens=1024,
-        temperature=0.8,
-        batch_size=args.max_samples - 1,  # minus the 1 greedy sample
-    )
-
-    if args.mock:
-        first_traj = {
-            "response": "",
-            "usage": {
-                "prompt_tokens": num_tokens_from_messages(message, args.model),
-            },
-        }
-        later_traj = {
-            "response": "",
-            "usage": {"prompt_tokens": 0},
-        }
-        if args.max_samples - 1:
-            sample_trajs = [first_traj] + [later_traj] * (args.max_samples - 2)
-        else:
-            sample_trajs = []
-    else:
-        if args.max_samples - 1:
-            # always use cached prompt if possible for later samples
-            sample_trajs = model.codegen(
-                message, num_samples=args.max_samples - 1, prompt_cache=True
+    if not related_locs_list:
+        # 如果没有找到相关代码位置，使用默认模板生成一个测试
+        message = generate_tests_prompt_template.format(
+            problem_statement=problem_statement,
+        ).strip()
+        
+        if not args.skip_greedy:
+            model = make_model(
+                model=args.model,
+                logger=logger,
+                backend=args.backend,
+                max_tokens=1024,
+                temperature=0,
+                batch_size=1,
             )
-        else:
-            sample_trajs = []
-
-    sample_responses.extend(sample_trajs)
-
-    count = 0
-    while count < args.max_samples:
-        print(f"trying the {count + 1}-th sample ...")
-        ret = sample_responses[count]
-        count += 1
-        traj.append({**ret, "prompt": message})
-
-        if args.mock:
-            continue
-
-        raw_output = ret["response"]
-        logger.info(f"raw output:\n{raw_output}")
-        print((f"raw output:\n{raw_output}"))
-        all_generations.append(raw_output)
-
-        counts.append(count)
-        raw_outputs.append(raw_output)
-
-    if write_lock is not None:
-        write_lock.acquire()
-    with open(args.output_file, "a") as f:
-        f.write(
-            json.dumps(
-                {
-                    "instance_id": instance_id,
-                    "raw_output": raw_outputs,
-                    "all_generations": [all_generations],
-                    "try_count": counts,
-                    "traj": traj,
-                    "prev_content": [
-                        [""]
-                    ],  # To make the tests compatible with the repair setup
-                    "file_names": [["reproduce_bug.py"]],
-                }
+            greedy_traj = model.codegen(message, num_samples=1)[0]
+            sample_responses.append(greedy_traj)
+    else:
+        # 为每个定位结果生成对应的测试
+        for i, related_locs in enumerate(related_locs_list):
+            # 使用 utils.py 中的 gen_prompt 函数生成 prompt
+            message = gen_prompt(problem_statement, related_locs)
+            
+            if not args.skip_greedy:
+                model = make_model(
+                    model=args.model,
+                    logger=logger,
+                    backend=args.backend,
+                    max_tokens=1024,
+                    temperature=0,
+                )
+                if args.mock:
+                    greedy_traj = {
+                        "response": "",
+                        "usage": {
+                            "prompt_tokens": num_tokens_from_messages(message, args.model),
+                        },
+                    }
+                else:
+                    greedy_traj = model.codegen(message, num_samples=1)[0]
+                sample_responses.append(greedy_traj)
+            
+            # 生成温度采样样本
+            model = make_model(
+                model=args.model,
+                logger=logger,
+                backend=args.backend,
+                max_tokens=1024,
+                temperature=0.8,
+                batch_size=args.max_samples - 1,
             )
-            + "\n"
-        )
-    if write_lock is not None:
-        write_lock.release()
+            if args.mock:
+                temp_samples = [{
+                    "response": "",
+                    "usage": {"prompt_tokens": 0},
+                }] * args.max_samples
+            else:
+                temp_samples = model.codegen(message, num_samples=args.max_samples, prompt_cache=True)
+            sample_responses.extend(temp_samples)
+            
+            # 为每个定位结果创建对应的输出文件
+            output_dir = os.path.join(args.output_folder, "reproduce_test_individual")
+            os.makedirs(output_dir, exist_ok=True)
+            output_file = os.path.join(output_dir, f"reproduction_merged_{i}-{i}_outputs.json")
+            
+            raw_outputs, counts, all_generations, traj = [], [], [], []
+            raw_output = ""
+
+            count = 0
+            while count < args.max_samples -1:  # 1 greedy + 19 temperature samples
+                print(f"trying the {count + 1}-th sample ...")
+                ret = sample_responses[count]
+                count += 1
+                traj.append({**ret, "prompt": message})
+
+                if args.mock:
+                    continue
+
+                raw_output = ret["response"]
+                print((f"raw output:\n{len(raw_output)}"))
+                logger.info(f"raw output:\n{raw_output}")
+                all_generations.append(raw_output)
+
+                counts.append(count)
+                raw_outputs.append(raw_output)
+
+            if write_lock is not None:
+                write_lock.acquire()
+
+            with open(output_file, "a") as f:
+                f.write(
+                    json.dumps(
+                        {
+                            "instance_id": instance_id,
+                            "raw_output": raw_outputs,
+                            "all_generations": [all_generations],
+                            "try_count": counts,
+                            "traj": traj,
+                            "prev_content": [[""]],
+                            "file_names": [["reproduce_bug.py"]],
+                            "edit_loc_index": i,
+                        }
+                    )
+                    + "\n"
+                )
+            
+            if write_lock is not None:
+                write_lock.release()
 
 
 def generate_tests(args):
@@ -253,10 +243,11 @@ def generate_tests(args):
     swe_bench_data = load_dataset(args.dataset, split="test")
     instances = swe_bench_data["instance_id"]
     prev_o = load_jsonl(args.output_file) if os.path.exists(args.output_file) else []
-
+    print("generate_tests start")
     if args.num_threads == 1:
         for instance_id in tqdm(instances, total=len(instances), colour="MAGENTA"):
             gen_test(instance_id, args, swe_bench_data, prev_o)
+        print("generate_tests done")
     else:
         write_lock = Lock()
         with concurrent.futures.ThreadPoolExecutor(
@@ -280,55 +271,57 @@ def post_process_tests(args):
     """
     apply some diff formatting.
     """
-    raw_outputs = load_jsonl(args.raw_output_file)
+    print(f"post_process_tests start, raw_output_file: {args.raw_output_file}")
+    raw_outputs = load_json(args.raw_output_file)
     generation_idx = args.select_id
 
-    for raw_output in raw_outputs:
-        instance_id = raw_output["instance_id"]
+    # 读取 raw_outputs 中的 all_generations
+    instance_id = raw_outputs["instance_id"]
 
-        if (
-            raw_output["raw_output"] == ""
-            or not raw_output["all_generations"][0][generation_idx]
-        ):
-            with open(args.output_file, "a") as f:
-                f.write(
-                    json.dumps(
-                        {
-                            "model_name_or_path": "agentless",
-                            "instance_id": instance_id,
-                            "test_patch": "",
-                        }
-                    )
-                    + "\n"
-                )
-            continue
-
-        if args.select_id == -1:
-            # Use the last generation
-            assert False, "not implemented for now"
-        else:
-            raw_git_diffs = raw_output["all_generations"][0][generation_idx]
-            extracted_code = extract_first_code_block(
-                raw_output["all_generations"][0][generation_idx]
-            )
-            if extracted_code:
-                git_diffs = create_patch_from_code(extracted_code)
-            else:
-                git_diffs = ""
-
+    if (
+        raw_outputs["raw_output"] == ""
+        or not raw_outputs["all_generations"][0]
+    ):
         with open(args.output_file, "a") as f:
             f.write(
                 json.dumps(
                     {
                         "model_name_or_path": "agentless",
                         "instance_id": instance_id,
-                        "test_patch": git_diffs.lstrip(),
-                        "raw_test_patch": raw_git_diffs,
-                        "original_file_content": "",
+                        "test_patch": "",
                     }
                 )
                 + "\n"
             )
+        return
+
+    if args.select_id == -1:
+        # Use the last generation
+        assert False, "not implemented for now"
+    else:
+        for i, generation in enumerate(raw_outputs["all_generations"][0]):
+            raw_git_diffs = generation
+            extracted_code = extract_first_code_block(generation)
+            if extracted_code:
+                git_diffs = create_patch_from_code(extracted_code)
+            else:
+                git_diffs = ""
+            patch_save_dir =  os.path.join(args.output_folder, f'test_patch_{generation_idx}')
+            if not os.path.exists(patch_save_dir):
+                os.makedirs(patch_save_dir)
+            with open(patch_save_dir + f'/test_patch_{i}.json', "a") as f:
+                f.write(
+                    json.dumps(
+                        {
+                            "model_name_or_path": "agentless",
+                            "instance_id": instance_id,
+                            "test_patch": git_diffs.lstrip(),
+                            "raw_test_patch": raw_git_diffs,
+                            "original_file_content": "",
+                        }
+                    )
+                    + "\n"
+                )
 
 
 def normalize_test(test: str):
@@ -544,12 +537,18 @@ def main():
     if not args.select:
         args.output_file = os.path.join(args.output_folder, "output.jsonl")
         generate_tests(args)
-        args.raw_output_file = args.output_file
-        for i in range(args.max_samples):
-            args.output_file = args.raw_output_file.replace(
-                ".jsonl", f"_{i}_processed_reproduction_test.jsonl"
-            )
+        print("generate_tests done")
+        
+        # 保存目录路径
+        raw_output_dir = os.path.join(os.path.dirname(args.output_file), 'reproduce_test_individual')
+        
+        # 读取目录下的所有 json 文件
+        json_files = [f for f in os.listdir(raw_output_dir) if f.endswith('.json')]
+        
+        for i in range(len(json_files)):
             args.select_id = i
+            # 使用完整的文件路径
+            args.raw_output_file = os.path.join(raw_output_dir, f'reproduction_merged_{i}-{i}_outputs.json')
             post_process_tests(args)
     else:
         normalize_tests(args)
