@@ -110,8 +110,7 @@ We are currently solving the following issue within our repository. Here is the 
 We have found the bug code and the related test functions in the following files:
 {prompt_files}
 
-Please generate a complete test that can be used to reproduce the issue.
-The test will be put in a independent file, you need to ensure the test can be run independently, add necessary imports, settings, and functions to make the test runnable.
+Please generate a complete test based on the provided test that can be used to reproduce the issue. 
 Understood the existed test functions could help you generate the new test.
 The generated test should be able to be used to both reproduce the issue as well as to verify the issue has been fixed.
 
@@ -119,10 +118,6 @@ The generated test should be able to be used to both reproduce the issue as well
 The complete test should contain the following:
 1. Necessary imports
 2. Code to reproduce the issue described in the issue text
-3. Print "Issue reproduced" if the outcome indicates that the issue is reproduced
-4. Print "Issue resolved" if the outcome indicates that the issue has been successfully resolved
-5. Print "Other issues" if the outcome indicates there are other issues with the source code
-
 
 Please ensure the generated test reflects the issue described in the provided issue text.
 The generated test should be able to be used to both reproduce the issue as well as to verify the issue has been fixed.

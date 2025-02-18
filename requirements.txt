@@ -1,9 +1,11 @@
 anthropic
 openai
 pre-commit
-datasets
+datasets>=2.14.0
 tiktoken
 libcst
 llama-index
 jsonlines
 swebench @ git+https://github.com/princeton-nlp/SWE-bench
+pandas>=2.0.0
+tabulate>=0.9.0
