@@ -123,11 +123,11 @@ def gen_test(instance_id, args, swe_bench_data, prev_o, write_lock=None):
     problem_statement = bench_data["problem_statement"]
 
     # 获取该问题对应的相关代码定位信息
-    related_locs_list = find_edit_location_file(instance_id)
+    related_locs_list = find_edit_location_file(instance_id, logger)
     sample_responses = []
 
     if not related_locs_list:
-        # 如果没有找到相关代码位置，使用默认模板生成一个测试
+        # 如果没有找到相关代码位置，使用默认模板生成一个测试，并且不进行greedy和temperature采样
         message = generate_tests_prompt_template.format(
             problem_statement=problem_statement,
         ).strip()
@@ -147,7 +147,7 @@ def gen_test(instance_id, args, swe_bench_data, prev_o, write_lock=None):
         # 为每个定位结果生成对应的测试
         for i, related_locs in enumerate(related_locs_list):
             # 使用 utils.py 中的 gen_prompt 函数生成 prompt
-            message = gen_prompt(problem_statement, related_locs)
+            message = gen_prompt(problem_statement, related_locs, instance_id)
             
             if not args.skip_greedy:
                 model = make_model(
@@ -168,26 +168,26 @@ def gen_test(instance_id, args, swe_bench_data, prev_o, write_lock=None):
                     greedy_traj = model.codegen(message, num_samples=1)[0]
                 sample_responses.append(greedy_traj)
             
-            # 生成温度采样样本
-            model = make_model(
-                model=args.model,
-                logger=logger,
-                backend=args.backend,
-                max_tokens=1024,
-                temperature=0.8,
-                batch_size=args.max_samples - 1,
-            )
-            if args.mock:
-                temp_samples = [{
-                    "response": "",
-                    "usage": {"prompt_tokens": 0},
-                }] * args.max_samples
-            else:
-                temp_samples = model.codegen(message, num_samples=args.max_samples, prompt_cache=True)
-            sample_responses.extend(temp_samples)
-            
+                # 生成温度采样样本
+                model = make_model(
+                    model=args.model,
+                    logger=logger,
+                    backend=args.backend,
+                    max_tokens=1024,
+                    temperature=0.8,
+                    batch_size=args.max_samples - 1,
+                )
+                if args.mock:
+                    temp_samples = [{
+                        "response": "",
+                        "usage": {"prompt_tokens": 0},
+                    }] * args.max_samples
+                else:
+                    temp_samples = model.codegen(message, num_samples=args.max_samples, prompt_cache=True)
+                sample_responses.extend(temp_samples)
+        
             # 为每个定位结果创建对应的输出文件
-            output_dir = os.path.join(args.output_folder, "reproduce_test_individual")
+            output_dir = os.path.join(args.output_folder, "reproduce_test_individual", instance_id)
             os.makedirs(output_dir, exist_ok=True)
             output_file = os.path.join(output_dir, f"reproduction_merged_{i}-{i}_outputs.json")
             
@@ -195,8 +195,7 @@ def gen_test(instance_id, args, swe_bench_data, prev_o, write_lock=None):
             raw_output = ""
 
             count = 0
-            while count < args.max_samples -1:  # 1 greedy + 19 temperature samples
-                print(f"trying the {count + 1}-th sample ...")
+            while count < args.max_samples:  # 1 greedy + 19 temperature samples
                 ret = sample_responses[count]
                 count += 1
                 traj.append({**ret, "prompt": message})
@@ -205,7 +204,6 @@ def gen_test(instance_id, args, swe_bench_data, prev_o, write_lock=None):
                     continue
 
                 raw_output = ret["response"]
-                print((f"raw output:\n{len(raw_output)}"))
                 logger.info(f"raw output:\n{raw_output}")
                 all_generations.append(raw_output)
 
@@ -229,7 +227,6 @@ def gen_test(instance_id, args, swe_bench_data, prev_o, write_lock=None):
                             "edit_loc_index": i,
                         }
                     )
-                    + "\n"
                 )
             
             if write_lock is not None:
@@ -243,11 +240,9 @@ def generate_tests(args):
     swe_bench_data = load_dataset(args.dataset, split="test")
     instances = swe_bench_data["instance_id"]
     prev_o = load_jsonl(args.output_file) if os.path.exists(args.output_file) else []
-    print("generate_tests start")
     if args.num_threads == 1:
         for instance_id in tqdm(instances, total=len(instances), colour="MAGENTA"):
             gen_test(instance_id, args, swe_bench_data, prev_o)
-        print("generate_tests done")
     else:
         write_lock = Lock()
         with concurrent.futures.ThreadPoolExecutor(
@@ -271,18 +266,18 @@ def post_process_tests(args):
     """
     apply some diff formatting.
     """
-    print(f"post_process_tests start, raw_output_file: {args.raw_output_file}")
     raw_outputs = load_json(args.raw_output_file)
     generation_idx = args.select_id
 
     # 读取 raw_outputs 中的 all_generations
     instance_id = raw_outputs["instance_id"]
+    patch_save_dir =  '/'.join(args.raw_output_file.split('/')[:-1])
 
     if (
         raw_outputs["raw_output"] == ""
         or not raw_outputs["all_generations"][0]
     ):
-        with open(args.output_file, "a") as f:
+        with open(patch_save_dir + f'/test_patch_{generation_idx}.jsonl', "a") as f:
             f.write(
                 json.dumps(
                     {
@@ -306,21 +301,19 @@ def post_process_tests(args):
                 git_diffs = create_patch_from_code(extracted_code)
             else:
                 git_diffs = ""
-            patch_save_dir =  os.path.join(args.output_folder, f'test_patch_{generation_idx}')
-            if not os.path.exists(patch_save_dir):
-                os.makedirs(patch_save_dir)
-            with open(patch_save_dir + f'/test_patch_{i}.json', "a") as f:
+            patch_save_dir =  '/'.join(args.raw_output_file.split('/')[:-1])
+            # sample 出来的 patch 放到一个 jsonl 文件中
+            with open(patch_save_dir + f'/test_patch_{generation_idx}.jsonl', "a") as f:
                 f.write(
                     json.dumps(
                         {
                             "model_name_or_path": "agentless",
                             "instance_id": instance_id,
-                            "test_patch": git_diffs.lstrip(),
-                            "raw_test_patch": raw_git_diffs,
+                            "model_patch": git_diffs.lstrip(),
+                            "raw_model_patch": raw_git_diffs,
                             "original_file_content": "",
                         }
-                    )
-                    + "\n"
+                    ) + "\n"
                 )
 
 
@@ -542,13 +535,14 @@ def main():
         # 保存目录路径
         raw_output_dir = os.path.join(os.path.dirname(args.output_file), 'reproduce_test_individual')
         
-        # 读取目录下的所有 json 文件
-        json_files = [f for f in os.listdir(raw_output_dir) if f.endswith('.json')]
+        # 递归查找目录及子目录下的所有 json 文件
+        json_files = []
+        for root, dirs, files in os.walk(raw_output_dir):
+            json_files.extend([os.path.join(root, f) for f in files if f.endswith('.json')])
         
         for i in range(len(json_files)):
             args.select_id = i
-            # 使用完整的文件路径
-            args.raw_output_file = os.path.join(raw_output_dir, f'reproduction_merged_{i}-{i}_outputs.json')
+            args.raw_output_file = json_files[i]
             post_process_tests(args)
     else:
         normalize_tests(args)

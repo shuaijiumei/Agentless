@@ -1,6 +1,8 @@
 import json
-
-def find_edit_location_file(instance_id: str) -> dict:
+from trace_test import find_element_tests
+import os
+from logging import Logger
+def find_edit_location_file(instance_id: str, logger: Logger) -> dict:
     """
     根据instance_id查找对应的编辑位置文件路径
     
@@ -10,117 +12,79 @@ def find_edit_location_file(instance_id: str) -> dict:
     Returns:
         str: 编辑位置文件的完整路径
     """
-    import os
 
     base_dir = "/mnt/d/vscodeProject/Agentless/results/swe-bench-lite/edit_location_individual"
-    # 遍历所有文件
-    related_locs_list = []
+    cache_dir = "/mnt/d/vscodeProject/Agentless/results/swe-bench-lite/reproduction_test_samples/cache.json"
+    related_test_list = []
+    # 先获取目录下所有文件
+    files = os.listdir(base_dir)
+    # 筛选出符合格式的文件并获取最大索引
+    max_index = -1
+    for file in files:
+        if file.startswith("loc_merged_") and file.endswith("_outputs.jsonl"):
+            try:
+                index = int(file.split("_")[2].split("-")[0])
+                max_index = max(max_index, index)
+            except:
+                continue
     
-    for i in range(0, 100):  # 假设最多100个文件
-        file_path = os.path.join(base_dir, f"loc_merged_{i}-{i}_outputs.json")
+    # 遍历实际存在的文件范围
+    for i in range(0, max_index + 1):
+        file_path = os.path.join(base_dir, f"loc_merged_{i}-{i}_outputs.jsonl")
         if os.path.exists(file_path):
-            # 打开文件
             with open(file_path, 'r') as f:
-                data = json.load(f)
-                if data["instance_id"] == instance_id:
-                    related_locs = data["found_related_locs"]
-                    # 遍历 related_locs 中的 key 和 value
-                    for key, value in related_locs.items():
-                        test_func  = find_related_test_functions(key, value)
-                        related_locs[key] = {
-                            "test_functions": test_func,
-                            "related_items": value
-                        }
-                    related_locs_list.append(related_locs)
-    return related_locs_list
+                for line in f:
+                    item = json.loads(line.strip())
+                    if item.get('instance_id') == instance_id:
+                        related_test = find_element_tests(instance_id, item.get('found_related_locs'), cache_dir, logger)
+                        related_test_list.append(related_test)
+    return related_test_list
         
 
-def find_related_test_functions(file_path: str, related_items: list) -> list:
-    """
-    遍历 found_related_locs 中的内容，定位相关的测试函数
-    
-    Args:
-        file_path: 文件路径
-        related_items: 相关内容
-    """
-    test_functions = []
 
-    """
-        TODO 寻找测试用例的相关逻辑
-    """
-    # MOCK
-    if file_path == "django/core/files/storage.py":
-        return '''
-    class FileSystemStorageTests(unittest.TestCase):
-
-      def test_deconstruction(self):
-          path, args, kwargs = temp_storage.deconstruct()
-          self.assertEqual(path, "django.core.files.storage.FileSystemStorage")
-          self.assertEqual(args, ())
-          self.assertEqual(kwargs, {'location': temp_storage_location})
-
-          kwargs_orig = {
-              'location': temp_storage_location,
-              'base_url': 'http://myfiles.example.com/'
-          }
-          storage = FileSystemStorage(**kwargs_orig)
-          path, args, kwargs = storage.deconstruct()
-          self.assertEqual(kwargs, kwargs_orig)
-
-      def test_lazy_base_url_init(self):
-          """
-          FileSystemStorage.__init__() shouldn't evaluate base_url.
-          """
-          storage = FileSystemStorage(base_url=reverse_lazy('app:url'))
-          with self.assertRaises(NoReverseMatch):
-              storage.url(storage.base_url)
-'''
-    if file_path == "django/core/files/uploadedfile.py":
-        return '''
-    class InMemoryUploadedFileTests(unittest.TestCase):
-      def test_open_resets_file_to_start_and_returns_context_manager(self):
-          uf = InMemoryUploadedFile(StringIO('1'), '', 'test', 'text/plain', 1, 'utf8')
-          uf.read()
-          with uf.open() as f:
-              self.assertEqual(f.read(), '1')
-
-    class TemporaryUploadedFileTests(unittest.TestCase):
-      def test_extension_kept(self):
-          """The temporary file name has the same suffix as the original file."""
-          with TemporaryUploadedFile('test.txt', 'text/plain', 1, 'utf8') as temp_file:
-              self.assertTrue(temp_file.file.name.endswith('.upload.txt'))
-'''
-    else:
-        return ''
-
-
-def gen_prompt(problem_statement: str, related_locs_item: dict) -> str:
+def gen_prompt(problem_statement: str, related_locs_item: dict, instance_id: str) -> str:
     # 使用 join 方法和生成器表达式来构造每个文件的详情字符串
+
     prompt_files = ""
-    for file_path, value in related_locs_item.items():
-        prompt_files += f"File: {file_path}\nRelated items: {value['related_items']}\nTest functions: {value['test_functions']}\n"
-
-
+    for related_item in related_locs_item:
+        test_str = "Related Tests: \n" if len(related_item['tests']) > 0 else ""
+        prompt_files += f'''Related Item: {related_item['element_type']}: {related_item['element_name']}
+{test_str}'''
+        for test in related_item['tests']:
+            prompt_files += f'''{test['code']}\n'''
+    
     generate_tests_prompt_template = f"""
-We are currently solving the following issue within our repository. Here is the issue text:
---- BEGIN ISSUE ---
+We are addressing the following issue in our repository: 
+--- BEGIN ISSUE --- 
 {problem_statement}
---- END ISSUE ---
+ --- END ISSUE ---
 
-We have found the bug code and the related test functions in the following files:
+We have identified the bug and related test functions in the following files: 
 {prompt_files}
 
-Please generate a complete test based on the provided test that can be used to reproduce the issue. 
-Understood the existed test functions could help you generate the new test.
-The generated test should be able to be used to both reproduce the issue as well as to verify the issue has been fixed.
+Please generate a new test based on the provided test that can be used to:
+1. Reproduce the issue described above
+2. Verify that the issue has been fixed
 
-
-The complete test should contain the following:
-1. Necessary imports
-2. Code to reproduce the issue described in the issue text
-
-Please ensure the generated test reflects the issue described in the provided issue text.
-The generated test should be able to be used to both reproduce the issue as well as to verify the issue has been fixed.
-Wrap the complete test in ```python...```.
+**Test requirements:**
+1. The test should be able to both reproduce the issue and validate its resolution.
+2. The test should only contain the code necessary to reproduce the issue, excluding any existing test code.
+3. Include the necessary imports.
+4. Wrap the complete test in python....
+Ensure that the generated test accurately reflects the issue described in the provided issue text.
 """
+    if not os.path.exists("test_generation_prompt"):
+        os.makedirs("test_generation_prompt")
+    with open(os.path.join("test_generation_prompt", f"{instance_id}.txt"), "w") as f:
+        f.write(generate_tests_prompt_template)
     return generate_tests_prompt_template
+
+
+if __name__ == "__main__":
+    instance_id = "django__django-10914"
+    related_test_list = find_edit_location_file(instance_id)
+    problem_statement = 'hello world'
+    for item in related_test_list:
+        prompt = gen_prompt(problem_statement, item)
+        with open("prompt.txt", "w") as f:
+            f.write(prompt)

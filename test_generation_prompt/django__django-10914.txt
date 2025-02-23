@@ -1,0 +1,129 @@
+
+We are addressing the following issue in our repository: 
+--- BEGIN ISSUE --- 
+Set default FILE_UPLOAD_PERMISSION to 0o644.
+Description
+	
+Hello,
+As far as I can see, the ​File Uploads documentation page does not mention any permission issues.
+What I would like to see is a warning that in absence of explicitly configured FILE_UPLOAD_PERMISSIONS, the permissions for a file uploaded to FileSystemStorage might not be consistent depending on whether a MemoryUploadedFile or a TemporaryUploadedFile was used for temporary storage of the uploaded data (which, with the default FILE_UPLOAD_HANDLERS, in turn depends on the uploaded data size).
+The tempfile.NamedTemporaryFile + os.rename sequence causes the resulting file permissions to be 0o0600 on some systems (I experience it here on CentOS 7.4.1708 and Python 3.6.5). In all probability, the implementation of Python's built-in tempfile module explicitly sets such permissions for temporary files due to security considerations.
+I found mentions of this issue ​on GitHub, but did not manage to find any existing bug report in Django's bug tracker.
+
+ --- END ISSUE ---
+
+We have identified the bug and related test functions in the following files: 
+Related Item: variable: FILE_UPLOAD_PERMISSIONS
+Related Item: class: FileSystemStorage
+Related Tests: 
+    def test_get_filesystem_storage(self):
+        """
+        get_storage_class returns the class for a storage backend name/path.
+        """
+        self.assertEqual(
+            get_storage_class('django.core.files.storage.FileSystemStorage'),
+            FileSystemStorage)
+    def test_deconstruction(self):
+        path, args, kwargs = temp_storage.deconstruct()
+        self.assertEqual(path, "django.core.files.storage.FileSystemStorage")
+        self.assertEqual(args, ())
+        self.assertEqual(kwargs, {'location': temp_storage_location})
+
+        kwargs_orig = {
+            'location': temp_storage_location,
+            'base_url': 'http://myfiles.example.com/'
+        }
+        storage = FileSystemStorage(**kwargs_orig)
+        path, args, kwargs = storage.deconstruct()
+        self.assertEqual(kwargs, kwargs_orig)
+    def test_lazy_base_url_init(self):
+        """
+        FileSystemStorage.__init__() shouldn't evaluate base_url.
+        """
+        storage = FileSystemStorage(base_url=reverse_lazy('app:url'))
+        with self.assertRaises(NoReverseMatch):
+            storage.url(storage.base_url)
+    def test_file_upload_permissions(self):
+        self.storage = FileSystemStorage(self.storage_dir)
+        name = self.storage.save("the_file", ContentFile("data"))
+        actual_mode = os.stat(self.storage.path(name))[0] & 0o777
+        self.assertEqual(actual_mode, 0o654)
+    def test_file_upload_default_permissions(self):
+        self.storage = FileSystemStorage(self.storage_dir)
+        fname = self.storage.save("some_file", ContentFile("data"))
+        mode = os.stat(self.storage.path(fname))[0] & 0o777
+        self.assertEqual(mode, 0o666 & ~self.umask)
+    def test_file_upload_directory_permissions(self):
+        self.storage = FileSystemStorage(self.storage_dir)
+        name = self.storage.save("the_directory/the_file", ContentFile("data"))
+        dir_mode = os.stat(os.path.dirname(self.storage.path(name)))[0] & 0o777
+        self.assertEqual(dir_mode, 0o765)
+    def test_file_upload_directory_default_permissions(self):
+        self.storage = FileSystemStorage(self.storage_dir)
+        name = self.storage.save("the_directory/the_file", ContentFile("data"))
+        dir_mode = os.stat(os.path.dirname(self.storage.path(name)))[0] & 0o777
+        self.assertEqual(dir_mode, 0o777 & ~self.umask)
+Related Item: class: TemporaryUploadedFile
+Related Tests: 
+    def test_extension_kept(self):
+        """The temporary file name has the same suffix as the original file."""
+        with TemporaryUploadedFile('test.txt', 'text/plain', 1, 'utf8') as temp_file:
+            self.assertTrue(temp_file.file.name.endswith('.upload.txt'))
+    def test_save_doesnt_close(self):
+        with TemporaryUploadedFile('test', 'text/plain', 1, 'utf8') as file:
+            file.write(b'1')
+            file.seek(0)
+            self.assertFalse(file.closed)
+            self.storage.save('path/to/test.file', file)
+            self.assertFalse(file.closed)
+            self.assertFalse(file.file.closed)
+
+        file = InMemoryUploadedFile(StringIO('1'), '', 'test', 'text/plain', 1, 'utf8')
+        with file:
+            self.assertFalse(file.closed)
+            self.storage.save('path/to/test.file', file)
+            self.assertFalse(file.closed)
+            self.assertFalse(file.file.closed)
+    def test_move_temporary_file(self):
+        """
+        The temporary uploaded file is moved rather than copied to the
+        destination.
+        """
+        with TemporaryUploadedFile('something.txt', 'text/plain', 0, 'UTF-8') as tmp_file:
+            tmp_file_path = tmp_file.temporary_file_path()
+            Document.objects.create(myfile=tmp_file)
+            self.assertFalse(os.path.exists(tmp_file_path), 'Temporary file still exists')
+Related Item: class: InMemoryUploadedFile
+Related Tests: 
+    def test_open_resets_file_to_start_and_returns_context_manager(self):
+        uf = InMemoryUploadedFile(StringIO('1'), '', 'test', 'text/plain', 1, 'utf8')
+        uf.read()
+        with uf.open() as f:
+            self.assertEqual(f.read(), '1')
+    def test_save_doesnt_close(self):
+        with TemporaryUploadedFile('test', 'text/plain', 1, 'utf8') as file:
+            file.write(b'1')
+            file.seek(0)
+            self.assertFalse(file.closed)
+            self.storage.save('path/to/test.file', file)
+            self.assertFalse(file.closed)
+            self.assertFalse(file.file.closed)
+
+        file = InMemoryUploadedFile(StringIO('1'), '', 'test', 'text/plain', 1, 'utf8')
+        with file:
+            self.assertFalse(file.closed)
+            self.storage.save('path/to/test.file', file)
+            self.assertFalse(file.closed)
+            self.assertFalse(file.file.closed)
+
+
+Please generate a new test based on the provided test that can be used to:
+1. Reproduce the issue described above
+2. Verify that the issue has been fixed
+
+**Test requirements:**
+1. The test should be able to both reproduce the issue and validate its resolution.
+2. The test should only contain the code necessary to reproduce the issue, excluding any existing test code.
+3. Include the necessary imports.
+4. Wrap the complete test in python....
+Ensure that the generated test accurately reflects the issue described in the provided issue text.
