@@ -42,7 +42,7 @@ def localize_irrelevant_instance(
     bench_data = [x for x in swe_bench_data if x["instance_id"] == instance_id][0]
     problem_statement = bench_data["problem_statement"]
     structure = get_repo_structure(
-        instance_id, bug["repo"], bug["base_commit"], "playground"
+        instance_id, bug["repo"], bug["base_commit"], "playground", logger
     )
 
     filter_none_python(structure)  # some basic filtering steps
@@ -116,7 +116,7 @@ def localize_instance(
         return
 
     structure = get_repo_structure(
-        instance_id, bug["repo"], bug["base_commit"], "playground"
+        instance_id, bug["repo"], bug["base_commit"], "playground", logger
     )
 
     logger.info(f"================ localize {instance_id} ================")

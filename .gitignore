@@ -192,3 +192,4 @@ swebench_repo_structure
 init_script.sh
 playground
 playground_manual
+test_generation_prompt

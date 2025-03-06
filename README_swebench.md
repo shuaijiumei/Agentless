@@ -140,8 +140,7 @@ python agentless/fl/localize.py --related_level \
                                 --compress \
                                 --start_file results/swe-bench-lite/file_level_combined/combined_locs.jsonl \
                                 --num_threads 10 \
-                                --skip_existing \
-                                --target_id django__django-10914
+                                --skip_existing
 ```
 
 This will save the related elements in `results/swe-bench-lite/related_elements/loc_outputs.jsonl` with the logs saved in `results/swe-bench-lite/related_elements/localization_logs`
@@ -160,7 +159,6 @@ python agentless/fl/localize.py --fine_grain_line_level \
                                 --num_samples 4 \
                                 --start_file results/swe-bench-lite/related_elements/loc_outputs.jsonl \
                                 --num_threads 10 \
-                                --target_id django__django-10914 \
                                 --skip_existing 
 ```
 
@@ -190,8 +188,7 @@ python agentless/fl/localize.py --merge \
                                 --output_folder results/swe-bench-lite/edit_location_individual \
                                 --top_n 3 \
                                 --num_samples 4 \
-                                --start_file results/swe-bench-lite/edit_location_samples/loc_outputs.jsonl \
-                                --target_id django__django-10914
+                                --start_file results/swe-bench-lite/edit_location_samples/loc_outputs.jsonl
 ```
 
 The separate sets of edit locations can be found in `results/swe-bench-lite/edit_location_individual`. The location files will be named `loc_merged_{x}-{x}_outputs.jsonl` where `x` indicates the individual samples. For our experiments on SWE-bench, we will use all 4 sets of edit locations and perform repairs on them individually to generate 4 different repair runs.
@@ -305,11 +302,11 @@ Similar to patch generation, Agentless also generates multiple samples of reprod
 ```shell
 python ./agentless/test/generate_reproduction_tests.py --max_samples 20 \
                                                      --output_folder results/swe-bench-lite/reproduction_test_samples \
-                                                     --num_threads 1 \
-                                                     --target_id django__django-10914
+                                                     --num_threads 10
 
 ```
-# 目前这个只支持 num_threads = 1，因为在追溯到测试代码的时候，如果多线程运行，可能对同一个 repo 重复运行，导致错误。
+ **目前这个只支持 num_threads = 1，因为在追溯到测试代码的时候，如果多线程运行，可能对同一个 repo 重复运行，导致错误。 --> 复制并且提前准备好了不同 commit 的 repo，所以可以多线程运行。**
+
  Agentless Test Generation 生成测试的逻辑修改为了，根据 instance_id 找到对应的编辑位置文件，然后根据编辑位置文件生成测试。 流程走下来一共有 4 个可能的编辑位置，分别对这 4 个可能的位置进行分析，追踪到相应的测试函数，然后选取这个测试函数作为例子，生成测试。 一个可能的编辑位置会生成 max_samples 个测试，一共有 4 个可能的编辑位置，所以一共有 4 * max_samples 个测试。
 
 

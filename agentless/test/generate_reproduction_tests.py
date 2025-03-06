@@ -93,6 +93,161 @@ def extract_first_code_block(text):
 
     return None
 
+def save_reproduction_outputs(args, instance_id, i, sample_responses, message, logger, write_lock=None):
+    # 为每个定位结果创建对应的输出文件
+    output_dir = os.path.join(args.output_folder, "reproduce_test_individual", instance_id)
+    os.makedirs(output_dir, exist_ok=True)
+    output_file = os.path.join(output_dir, f"reproduction_merged_{i}-{i}_outputs.json")
+    
+    raw_outputs, counts, all_generations, traj = [], [], [], []
+    raw_output = ""
+
+    count = 0
+    while count < args.max_samples:  # 1 greedy + 19 temperature samples
+        ret = sample_responses[count]
+        count += 1
+        traj.append({**ret, "prompt": message})
+
+        if args.mock:
+            continue
+
+        raw_output = ret["response"]
+        logger.info(f"raw output:\n{raw_output}")
+        all_generations.append(raw_output)
+
+        counts.append(count)
+        raw_outputs.append(raw_output)
+
+    if write_lock is not None:
+        write_lock.acquire()
+
+    with open(output_file, "a") as f:
+        f.write(
+            json.dumps(
+                {
+                    "instance_id": instance_id,
+                    "raw_output": raw_outputs,
+                    "all_generations": [all_generations],
+                    "try_count": counts,
+                    "traj": traj,
+                    "prev_content": [[""]],
+                    "file_names": [["reproduce_bug.py"]],
+                    "edit_loc_index": i,
+                }
+            )
+        )
+    
+    if write_lock is not None:
+        write_lock.release()
+
+def get_previous_outputs(args):
+    """
+    Get previous outputs from the reproduce_test_individual directory.
+    
+    Arguments:
+    args -- command line arguments
+    
+    Returns:
+    A list of previously processed outputs
+    """
+    prev_o_path = os.path.join(args.output_folder, "reproduce_test_individual")
+    prev_o = [] 
+    
+    # Check if the directory exists
+    if os.path.exists(prev_o_path):
+        # Get all subdirectories in prev_o_path
+        subdirs = [d for d in os.listdir(prev_o_path) if os.path.isdir(os.path.join(prev_o_path, d))]
+        
+        for subdir in subdirs:
+            subdir_path = os.path.join(prev_o_path, subdir)
+            json_files = [f for f in os.listdir(subdir_path) if f.endswith('.json') and f.startswith('reproduction_merged_')]
+
+            # Check if there are exactly 4 files with the correct pattern (0-3)
+            expected_files = [f"reproduction_merged_{i}-{i}_outputs.json" for i in range(4)]
+
+            # Check if we have all 4 expected files
+            is_valid_directory = len(json_files) == 4 and all(expected_file in json_files for expected_file in expected_files)
+            has_empty_response = False
+            
+            # Only check for empty responses if we have all the expected files
+            if is_valid_directory:
+                for expected_file in expected_files:
+                    file_path = os.path.join(subdir_path, expected_file)
+                    try:
+                        with open(file_path, 'r') as f:
+                            file_data = json.load(f)
+                            if 'traj' in file_data and file_data['traj']:
+                                for item in file_data['traj']:
+                                    if 'response' not in item or item['response'] is None or item['response'] == "":
+                                        has_empty_response = True
+                                        print(f"Found empty response in traj item in file: {file_path}")
+                                        break
+                            if has_empty_response:
+                                break
+                    except json.JSONDecodeError:
+                        print(f"Error decoding JSON in file: {file_path}")
+                        has_empty_response = True
+                        break
+            
+            # Only add to prev_o if directory is valid and has no empty responses
+            if is_valid_directory and not has_empty_response:
+                prev_o.append(load_json(os.path.join(subdir_path, json_files[0])))
+            else:
+                # Delete directory if it's incomplete or has empty responses
+                import shutil
+                if not is_valid_directory:
+                    print(f"Deleted incomplete directory (missing expected files): {subdir_path}")
+                else:
+                    print(f"Deleted directory with empty responses: {subdir_path}")
+                shutil.rmtree(subdir_path)
+    else:
+        # Create the directory if it doesn't exist
+        os.makedirs(prev_o_path, exist_ok=True)
+    
+    #TODO: 静态分析失败了要做兜底处理
+    return prev_o
+
+
+def generate_samples(args, message, logger):
+    sample_responses = []
+    if not args.skip_greedy:
+        model = make_model(
+            model=args.model,
+            logger=logger,
+            backend=args.backend,
+            max_tokens=1024,
+            temperature=0,
+        )
+        if args.mock:
+            greedy_traj = {
+                "response": "",
+                "usage": {
+                    "prompt_tokens": num_tokens_from_messages(message, args.model),
+                },
+            }
+        else:
+            greedy_traj = model.codegen(message, num_samples=1)[0]
+        sample_responses.append(greedy_traj)
+    
+        # 生成温度采样样本
+        model = make_model(
+            model=args.model,
+            logger=logger,
+            backend=args.backend,
+            max_tokens=1024,
+            temperature=0.8,
+            batch_size=args.max_samples - 1,
+        )
+        if args.mock:
+            temp_samples = [{
+                "response": "",
+                "usage": {"prompt_tokens": 0},
+            }] * args.max_samples
+        else:
+            temp_samples = model.codegen(message, num_samples=args.max_samples, prompt_cache=True)
+        sample_responses.extend(temp_samples)
+    
+    return sample_responses
 
 def gen_test(instance_id, args, swe_bench_data, prev_o, write_lock=None):
     """
@@ -122,115 +277,34 @@ def gen_test(instance_id, args, swe_bench_data, prev_o, write_lock=None):
     bench_data = [x for x in swe_bench_data if x["instance_id"] == instance_id][0]
     problem_statement = bench_data["problem_statement"]
 
-    # 获取该问题对应的相关代码定位信息
-    related_locs_list = find_edit_location_file(instance_id, logger)
+    # 获取该问题对应的相关代码定位信息，使用多线程
+    related_locs_list = find_edit_location_file(
+        instance_id, 
+        logger,
+        bench_data
+    )
     sample_responses = []
 
     if not related_locs_list:
-        # 如果没有找到相关代码位置，使用默认模板生成一个测试，并且不进行greedy和temperature采样
+        # 如果没有找到相关代码位置，使用默认模板生成一个测试
+        logger.warning("No related locations found, using default template")
         message = generate_tests_prompt_template.format(
             problem_statement=problem_statement,
         ).strip()
         
+        sample_responses = generate_samples(args, message, logger)
         if not args.skip_greedy:
-            model = make_model(
-                model=args.model,
-                logger=logger,
-                backend=args.backend,
-                max_tokens=1024,
-                temperature=0,
-                batch_size=1,
-            )
-            greedy_traj = model.codegen(message, num_samples=1)[0]
-            sample_responses.append(greedy_traj)
+            save_reproduction_outputs(args, instance_id, 0, sample_responses, message, logger, write_lock)
+
     else:
         # 为每个定位结果生成对应的测试
         for i, related_locs in enumerate(related_locs_list):
             # 使用 utils.py 中的 gen_prompt 函数生成 prompt
-            message = gen_prompt(problem_statement, related_locs, instance_id)
-            
-            if not args.skip_greedy:
-                model = make_model(
-                    model=args.model,
-                    logger=logger,
-                    backend=args.backend,
-                    max_tokens=1024,
-                    temperature=0,
-                )
-                if args.mock:
-                    greedy_traj = {
-                        "response": "",
-                        "usage": {
-                            "prompt_tokens": num_tokens_from_messages(message, args.model),
-                        },
-                    }
-                else:
-                    greedy_traj = model.codegen(message, num_samples=1)[0]
-                sample_responses.append(greedy_traj)
-            
-                # 生成温度采样样本
-                model = make_model(
-                    model=args.model,
-                    logger=logger,
-                    backend=args.backend,
-                    max_tokens=1024,
-                    temperature=0.8,
-                    batch_size=args.max_samples - 1,
-                )
-                if args.mock:
-                    temp_samples = [{
-                        "response": "",
-                        "usage": {"prompt_tokens": 0},
-                    }] * args.max_samples
-                else:
-                    temp_samples = model.codegen(message, num_samples=args.max_samples, prompt_cache=True)
-                sample_responses.extend(temp_samples)
+            message = gen_prompt(problem_statement, related_locs, instance_id, i)
         
-            # 为每个定位结果创建对应的输出文件
-            output_dir = os.path.join(args.output_folder, "reproduce_test_individual", instance_id)
-            os.makedirs(output_dir, exist_ok=True)
-            output_file = os.path.join(output_dir, f"reproduction_merged_{i}-{i}_outputs.json")
-            
-            raw_outputs, counts, all_generations, traj = [], [], [], []
-            raw_output = ""
-
-            count = 0
-            while count < args.max_samples:  # 1 greedy + 19 temperature samples
-                ret = sample_responses[count]
-                count += 1
-                traj.append({**ret, "prompt": message})
-
-                if args.mock:
-                    continue
-
-                raw_output = ret["response"]
-                logger.info(f"raw output:\n{raw_output}")
-                all_generations.append(raw_output)
-
-                counts.append(count)
-                raw_outputs.append(raw_output)
-
-            if write_lock is not None:
-                write_lock.acquire()
-
-            with open(output_file, "a") as f:
-                f.write(
-                    json.dumps(
-                        {
-                            "instance_id": instance_id,
-                            "raw_output": raw_outputs,
-                            "all_generations": [all_generations],
-                            "try_count": counts,
-                            "traj": traj,
-                            "prev_content": [[""]],
-                            "file_names": [["reproduce_bug.py"]],
-                            "edit_loc_index": i,
-                        }
-                    )
-                )
-            
-            if write_lock is not None:
-                write_lock.release()
+            sample_responses = generate_samples(args, message, logger)
+            if not args.skip_greedy:
+                save_reproduction_outputs(args, instance_id, i, sample_responses, message, logger, write_lock)
 
 
 def generate_tests(args):
@@ -239,27 +313,31 @@ def generate_tests(args):
 
     swe_bench_data = load_dataset(args.dataset, split="test")
     instances = swe_bench_data["instance_id"]
-    prev_o = load_jsonl(args.output_file) if os.path.exists(args.output_file) else []
-    if args.num_threads == 1:
-        for instance_id in tqdm(instances, total=len(instances), colour="MAGENTA"):
-            gen_test(instance_id, args, swe_bench_data, prev_o)
-    else:
-        write_lock = Lock()
-        with concurrent.futures.ThreadPoolExecutor(
-            max_workers=args.num_threads
-        ) as executor:
-            futures = {
-                executor.submit(
-                    gen_test, instance_id, args, swe_bench_data, prev_o, write_lock
-                ): instance_id
-                for instance_id in instances
-            }
-            for future in tqdm(
-                concurrent.futures.as_completed(futures),
-                total=len(instances),
-                colour="MAGENTA",
-            ):
-                future.result()
+        
+    prev_o = get_previous_outputs(args)
+
+    print("We found %d previous outputs" % len(prev_o))
+
+    # if args.num_threads == 1:
+    #     for instance_id in tqdm(instances, total=len(instances), colour="MAGENTA"):
+    #         gen_test(instance_id, args, swe_bench_data, prev_o)
+    # else:
+    #     write_lock = Lock()
+    #     with concurrent.futures.ThreadPoolExecutor(
+    #         max_workers=args.num_threads
+    #     ) as executor:
+    #         futures = {
+    #             executor.submit(
+    #                 gen_test, instance_id, args, swe_bench_data, prev_o, write_lock
+    #             ): instance_id
+    #             for instance_id in instances
+    #         }
+    #         for future in tqdm(
+    #             concurrent.futures.as_completed(futures),
+    #             total=len(instances),
+    #             colour="MAGENTA",
+    #         ):
+    #             future.result()
 
 
 def post_process_tests(args):
@@ -281,9 +359,9 @@ def post_process_tests(args):
             f.write(
                 json.dumps(
                     {
-                        "model_name_or_path": "agentless",
+                        "model_name_or_path": "agentless_test",
                         "instance_id": instance_id,
-                        "test_patch": "",
+                        "model_patch": "",
                     }
                 )
                 + "\n"
@@ -307,7 +385,7 @@ def post_process_tests(args):
                 f.write(
                     json.dumps(
                         {
-                            "model_name_or_path": "agentless",
+                            "model_name_or_path": "agentless_test",
                             "instance_id": instance_id,
                             "model_patch": git_diffs.lstrip(),
                             "raw_model_patch": raw_git_diffs,
@@ -541,7 +619,7 @@ def main():
             json_files.extend([os.path.join(root, f) for f in files if f.endswith('.json')])
         
         for i in range(len(json_files)):
-            args.select_id = i
+            args.select_id = i % 4  # Only allow values from 0 to 3
             args.raw_output_file = json_files[i]
             post_process_tests(args)
     else:

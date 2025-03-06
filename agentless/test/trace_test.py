@@ -1,13 +1,10 @@
 #!/usr/bin/env python3
 import ast
 import os
-import argparse
 from typing import List, Tuple, Dict, Any, Literal
-from pathlib import Path
-import json
-import subprocess
 import datasets
 from logging import Logger
+from agentless.test.cache_manager import CacheManager
 ElementType = Literal['class', 'function', 'variable']
 
 class TestFinder(ast.NodeVisitor):
@@ -97,17 +94,6 @@ def analyze_test_file(file_path: str, target_name: str, element_type: ElementTyp
         print(f"Error analyzing {file_path}: {str(e)}")
         return []
 
-# TODO: 请在 Agentless/playground_manual/repositories 下面 clone 好需要的仓库
-def get_repo_path(repo_name: str) -> str:
-    """Get the full path to the repository."""
-    # repo_name 只取 / 后半部分
-    repo_name = repo_name.split("/")[-1]
-    base_path = Path("/mnt/d/vscodeProject/Agentless/playground_manual/repositories")
-    repo_path = base_path / repo_name
-    if not repo_path.exists():
-        raise ValueError(f"Repository '{repo_name}' not found in {base_path}")
-    return str(repo_path)
-
 def find_tests(target_name: str, source_file: str, repo_path: str, element_type: ElementType) -> List[Tuple[str, int, int, str]]:
     """
     Find all test functions that use the specified element.
@@ -153,71 +139,54 @@ def parse_element_info(item: str) -> Tuple[str, ElementType]:
     else:
         raise ValueError(f"Unknown element type in item: {item}")
 
-def find_element_tests(instance_id: str, found_related_locs, cache_dir: str, logger: Logger) -> Dict[str, List[Dict[str, Any]]]:
+def find_element_tests(instance_id: str, found_related_locs: Dict[str, List[str]], cache_manager: CacheManager, logger: Logger, dataset_item: Dict[str, Any]) -> List[Dict[str, Any]]:
     """
     Main function to find test code for elements (classes, functions, variables).
     Args:
         instance_id: Instance ID from the dataset
-        json_file: Path to the JSON file containing element information
+        found_related_locs: Dictionary containing related locations
+        cache_manager: Cache manager instance for thread-safe cache operations
+        logger: Logger instance
     Returns:
-        Dictionary with element names as keys and list of test information as values.
-        Each test info contains: {
-            'file_path': str,
-            'start_line': int,
-            'end_line': int,
-            'code': str,
-            'source_file': str,
-            'element_type': str
-        }
+        List of dictionaries containing test information
     """
-    # Load element information from JSON file
+    # Load element information
     element_info_list = []
     for file_path, items in found_related_locs.items():
-        processed_items = []
-        for item in items:
-            if "\n" in item:
-                processed_items.extend(item.split("\n"))
-            else:
-                processed_items.append(item)
+        processed_items = [
+            sub_item 
+            for item in items
+            for sub_item in (item.split("\n") if "\n" in item else [item])
+        ]
         
         for item in processed_items:
             try:
                 element_name, element_type = parse_element_info(item)
                 element_info_list.append({
                     "name": element_name,
-                    "type": element_type,
+                    "type": element_type, 
                     "source_file": file_path
                 })
             except ValueError:
-                continue  # Skip items that don't match expected format
-    
+                continue
+
     if not element_info_list:
-        raise ValueError("JSON file must contain valid element information")
-    # Create cache file if it doesn't exist
-    cache_data = {}
-    if os.path.exists(cache_dir):
-        try:
-            with open(cache_dir, "r") as f:
-                cache_data = json.load(f)
-        except json.JSONDecodeError:
-            # If cache file is corrupted, start with empty cache
-            cache_data = {}
+        raise ValueError("Must contain valid element information")
+
+    # 读取缓存
+    cache_data = cache_manager.read()
         
-    # Check cache for each element
+    # 检查缓存
     for element_info in element_info_list:
-        cache_key = f"{instance_id}_{element_info['source_file']}_{element_info['type']}_{element_info['name']}"
+        cache_key = "_".join([instance_id, element_info['source_file'], element_info['type'], element_info['name']])
         if cache_key in cache_data:
             element_info['tests'] = cache_data[cache_key]
-    # Get dataset item
-    dataset_item = get_dataset_item(instance_id)
+
     repo_name = dataset_item['repo']
     base_commit = dataset_item['base_commit']
-    
-    # Get repository path and checkout base commit
-    repo_path = get_repo_path(repo_name)
-    logger.info(f"\nChecking out base commit {base_commit} in repository {repo_name}...")
-    subprocess.run(["git", "checkout", base_commit], cwd=repo_path, check=True, capture_output=True)
-    
+    base_path = '/mnt/d/vscodeProject/Agentless/playground_manual/repo_commit'
+    repo_path = os.path.join(base_path, f'{repo_name.split("/")[-1]}_{base_commit}')
+
     try:
         # Find test code
         results_list = []
@@ -251,123 +220,14 @@ def find_element_tests(instance_id: str, found_related_locs, cache_dir: str, log
                         'end_line': end_line,
                         'code': code,
                     })
-                    cache_key = f"{instance_id}_{element_info['source_file']}_{element_info['type']}_{element_info['name']}"
-                    cache_data[cache_key] = tests
-                
-                    # Write updated cache to file
-                    os.makedirs(os.path.dirname(cache_dir), exist_ok=True)
-                    with open(cache_dir, "w") as f:
-                        json.dump(cache_data, f, indent=2)
                 results_list[-1]['tests'] = tests
+                
+                # 更新缓存
+                cache_key = "_".join([instance_id, element_info['source_file'], element_info['type'], element_info['name']])
+                cache_manager.write(cache_key, tests)
                    
         return results_list
-    finally:
-        # Try to checkout main branch, if fails try master
-        logger.info("\nRestoring to main branch...")
-        try:
-            subprocess.run(["git", "checkout", "main"], cwd=repo_path, check=True, capture_output=True)
-        except subprocess.CalledProcessError:
-            try:
-                print("Main branch not found, trying master...")
-                subprocess.run(["git", "checkout", "master"], cwd=repo_path, check=True, capture_output=True)
-            except subprocess.CalledProcessError:
-                print("Warning: Could not restore to main/master branch")
-
-def print_test_results(results_list: List[Dict[str, Any]], _: str = None):
-    """
-    Print test results in a formatted way.
-    Args:
-        results_list: List of dictionaries containing test information
-        _: Unused parameter (kept for backward compatibility)
-    """
-    if not results_list:
-        print("\nNo test code found.")
-        return
-
-    # Calculate statistics
-    total_elements = len(results_list)
-    total_tests = sum(len(result['tests']) for result in results_list)
-    test_files = set()
-    for result in results_list:
-        for test in result['tests']:
-            if test['file_path']:  # Only count non-empty file paths
-                test_files.add(test['file_path'])
-    total_files = len(test_files)
-    
-    print("\nTest Code Analysis Results")
-    print("=" * 80)
-    
-    # Group results by element type
-    results_by_type = {}
-    for result in results_list:
-        element_type = result['element_type']
-        if element_type not in results_by_type:
-            results_by_type[element_type] = []
-        results_by_type[element_type].append(result)
-    
-    # Print results grouped by type
-    for element_type, elements in sorted(results_by_type.items()):
-        print(f"\n{element_type.upper()} ({len(elements)} found)")
-        print("=" * 40)
-        
-        for element in elements:
-            element_name = element['element_name']
-            source_file = element['source_file']
-            print(f"\n{element_type.capitalize()}: {element_name}")
-            print(f"Defined in: {source_file}")
-            print("-" * 40)
-            
-            # Group tests by file
-            tests_by_file = {}
-            for test in element['tests']:
-                if test['file_path']:  # Skip empty test entries
-                    tests_by_file.setdefault(test['file_path'], []).append(test)
-            
-            if not tests_by_file:
-                print("\nNo test code found for this element.")
-                continue
-            
-            # Print tests for each file
-            for file_path, file_tests in tests_by_file.items():
-                rel_path = os.path.relpath(file_path, os.path.dirname(source_file))
-                print(f"\nTest file: {rel_path}")
-                print(f"Found {len(file_tests)} test functions:")
-                
-                for test_idx, test in enumerate(sorted(file_tests, key=lambda x: x['start_line']), 1):
-                    print(f"\n  {test_idx}. Lines {test['start_line']}-{test['end_line']}:")
-                    # Indent the code with proper spacing
-                    code_lines = test['code'].splitlines()
-                    if code_lines:
-                        # Print first line with less indentation (usually the function definition)
-                        print(f"     {code_lines[0]}")
-                        # Print remaining lines with more indentation
-                        for line in code_lines[1:]:
-                            print(f"       {line}")
-    
-    # Print summary
-    print("\nSUMMARY")
-    print("=" * 40)
-    print(f"Total elements found: {total_elements}")
-    for element_type, elements in sorted(results_by_type.items()):
-        print(f"- {element_type.capitalize()}s: {len(elements)}")
-    print(f"Total test functions: {total_tests}")
-    print(f"Total files with tests: {total_files}")
-    print("=" * 80)
-
-def main():
-    """Example usage with mock data."""
-    try:
-        # Example usage with django-10914
-        instance_id = "django__django-10914"
-        json_file = "/mnt/d/vscodeProject/Agentless/results/swe-bench-lite/edit_location_individual/loc_merged_0-0_outputs.json"
-        
-        results = find_element_tests(instance_id, json_file)
-        print(results)
-        print_test_results(results)
-        
     except Exception as e:
-        print(f"Error: {str(e)}")
-        return 1
+        logger.error(f"Error finding tests for {instance_id}: {str(e)}")
+        return []
 
-if __name__ == "__main__":
-    main()
